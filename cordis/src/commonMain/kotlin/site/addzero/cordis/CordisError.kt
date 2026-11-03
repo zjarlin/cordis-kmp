@@ -12,6 +12,8 @@ public enum class CordisErrorCode(public val defaultMessage: String) {
     ServiceInactive("required service is provided by an inactive fiber"),
     ServiceAlreadyRegistered("service has been registered in the same isolation"),
     ListenerFailed("one or more event listeners failed"),
+    PluginAbiInvalid("wasm artifact does not satisfy the cordis plugin abi"),
+    PluginLoadFailed("plugin artifact could not be loaded"),
 }
 
 /*

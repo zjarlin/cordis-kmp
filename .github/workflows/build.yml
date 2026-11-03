@@ -27,6 +27,9 @@ jobs:
       - name: 示例可运行
         run: ./gradlew :sample:run --console=plain
 
+      - name: 运行时 wasm 插件示例
+        run: ./gradlew :sample:wasmDemo --console=plain
+
       - name: 上传测试报告
         if: always()
         uses: actions/upload-artifact@v4

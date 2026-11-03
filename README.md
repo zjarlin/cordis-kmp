@@ -171,28 +171,94 @@ events.parallel("task")
 
 ---
 
-## 插件发现（按平台放手）
+## 运行时插件：WebAssembly
 
-框架只负责「已装载的插件如何协作」，**不负责「插件从哪来」**。这是刻意的边界，因为这件事在各平台上物理不同：
+「运行时插件」有两种含义，本库只做前一种，因为第二种不值得：
 
-| 平台 | 推荐做法 |
+| 层次 | 含义 | 本库 |
+|---|---|---|
+| 运行时装载 | 制品从外部来，宿主不重新编译 | ✅ 已实现 |
+| 运行时改代码 | Kotlin Script / eval | ❌ 不做 |
+
+### 为什么是 WASM，不是 JAR
+
+JAR 只有 JVM 认。iOS、Android Native、浏览器都不认，与「一次编写、全平台装载」直接冲突。
+WASM 是唯一被所有目标平台接受的通用可执行制品格式：
+
+| 平台 | WASM 引擎 |
 |---|---|
-| JVM | `ServiceLoader` 或 classpath 扫描，把找到的 `Plugin` 交给 `root.plugin(...)` |
-| Android | 同上；动态下发才需要 `DexClassLoader`（注意签名与版本兼容） |
-| iOS | 编译期静态注册表（KSP 生成），运行时只做 `enable/disable` |
-| Native / Desktop | 静态注册表，或 `dlopen` + 稳定 C ABI（成本高，慎用） |
-| JS / Wasm | 动态 `import()` |
+| JVM / Android | [Chicory](https://github.com/dylibso/chicory)（纯字节码实现，无需 JNI） |
+| JS / 浏览器 / Node | 引擎内置 `WebAssembly` |
+| iOS / macOS / Linux Native | Wasmtime cinterop（**尚未接入**，见下） |
 
-写成 `expect/actual` 时，建议只统一**接口形态**：
+这不是自造标准：Extism、WASI Component Model、Krustlet 都用同一套思路，
+制品可以由 Rust / Kotlin/Wasm / AssemblyScript / C 任意语言产出。
 
-```kotlin
-// commonMain
-expect class PluginLoader {
-    fun load(): List<Plugin<*>>
-}
+### 制品 ABI
+
+制品导出五个函数，导入一个模块：
+
+```
+导出：
+  cordis_abi_version  () -> i32         ABI 版本，必须等于 1
+  cordis_plugin_name  () -> i32         插件名指针（零结尾 UTF-8）
+  cordis_inject       () -> i32         依赖清单指针（'\n' 分隔的服务名）
+  cordis_start        () -> i32         0 成功，非 0 为插件自定义错误码
+  cordis_stop         () -> i32         可选，未导出视为无事可做
+
+导入（模块 "cordis"）：
+  log    (level: i32, ptr: i32, len: i32)
+  config (keyPtr: i32, keyLen: i32, outPtr: i32, outCap: i32) -> i32
+         >=0 写入字节数 / -1 缺失 / -2 缓冲不足
 ```
 
-而不要试图统一**加载机制** —— iOS 没有「运行时扫目录」这件事，硬统一只会得到一个到处是空实现的接口。
+装载与使用：
+
+```kotlin
+val loader = WasmPluginLoader(
+    runtime = ChicoryWasmRuntime(),          // JS 平台换成 JsWasmRuntime()
+    config = mapOf("prefix" to "runtime"),
+)
+
+// 制品可以从磁盘、网络、数据库任何地方来
+val plugin = loader.load(File("greeter.wasm").readBytes())
+engine.root.plugin(plugin)
+```
+
+装载后它就是一个**普通 `Plugin`**：参与同一套依赖解析、级联卸载、隔离域。
+宿主不需要为 WASM 插件写第二套生命周期管理 —— 这是本设计的核心收益。
+
+跑一遍看效果：
+
+```bash
+./gradlew :sample:wasmDemo
+```
+
+### 安全边界
+
+插件只能通过 `log` / `config` 两个导入函数与宿主交互，拿不到文件系统、网络、时钟，
+也读不到宿主进程内存以外的任何东西。所有跨边界字符串都在访问前校验长度与指针，
+避免一个写错的制品把宿主拖死。
+
+### Native 现状
+
+Kotlin/Native 没有内置 WASM 引擎。接 Wasmtime 需要为 `iosArm64` / `iosSimulatorArm64` /
+`macosArm64` / `linuxX64` 分别交叉编译 C 库并写 cinterop 绑定。
+
+当前 `WasmtimeWasmRuntime` 是一个**显式失败**的实现：调用即抛
+`CordisException(PluginLoadFailed)`，并在消息里说明原因。刻意不提供静默降级的空实现 ——
+让宿主立刻知道「这个平台还没接运行时」，比得到一个永远装载不成功、排查半天的诡异状态要好。
+
+### 插件怎么来，仍然按平台放手
+
+框架只管「已装载的插件如何协作」。制品发现属于宿主：
+
+| 平台 | 从哪拿制品 |
+|---|---|
+| JVM / Android | 文件系统、classpath 资源、下载 |
+| iOS | App Bundle 内置（审核限制，无法运行时下载可执行码） |
+| JS / 浏览器 | `fetch()` |
+| 服务端 | 数据库、对象存储、配置中心 |
 
 ---
 
@@ -214,6 +280,8 @@ CI 在 JVM 与 JS 上跑完整测试；Native 只做编译校验（交叉编译�
 | 生命周期 | effect runner + epoch 复用 | 显式状态机 + 轮次收敛 |
 | 事件过滤 | `thisArg` + `Context.filter` | 显式 `OnOptions` |
 | 动态性 | 运行时 Proxy 魔法 | 不用反射，全平台一致 |
+| 插件制品 | npm 包 + 运行时 `import()` | WebAssembly（跨平台通用） |
+| 插件发现 | 内置包管理器 | 交给宿主，按平台各自实现 |
 
 **没有移植**的部分：`@Inject` 装饰器、`Context` 属性级 Proxy 拦截、HMR 插件、`replace()` 插件热替换、`mixin`/`accessor` 属性表。这些依赖 JS 的对象模型，在 KMP 里要么做不到（iOS），要么只能用反射做半吊子（JVM 独有），因此不做。
 
@@ -224,11 +292,12 @@ CI 在 JVM 与 JS 上跑完整测试；Native 只做编译校验（交叉编译�
 ## 构建
 
 ```bash
-./gradlew :cordis-kmp:jvmTest           # JVM 测试（31 个）
-./gradlew :cordis-kmp:jsNodeTest        # JS 测试（同一套用例）
+./gradlew :cordis-kmp:jvmTest           # JVM 测试（38 个）
+./gradlew :cordis-kmp:jsNodeTest        # JS 测试（37 个，共用同一份 wasm 制品）
 ./gradlew :cordis-kmp:compileKotlinLinuxX64
 ./gradlew :cordis-kmp:compileKotlinMacosArm64
-./gradlew :sample:run               # 可运行示例
+./gradlew :sample:run               # 依赖驱动生命周期示例
+./gradlew :sample:wasmDemo          # 运行时装载外部 wasm 插件
 ./gradlew publishToMavenLocal       # 发布到本地 Maven
 ```
 

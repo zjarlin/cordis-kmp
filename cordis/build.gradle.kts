@@ -36,6 +36,13 @@ kotlin {
             implementation(kotlin("test"))
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
         }
+
+        // WASM 运行时按平台各自引入：Chicory 是纯 JVM 字节码实现，Android 直接复用；
+        // JS 走引擎内置的 WebAssembly，不需要任何依赖。
+        jvmMain.dependencies {
+            implementation("com.dylibso.chicory:runtime:1.4.0")
+            implementation("com.dylibso.chicory:wasm:1.4.0")
+        }
     }
 }
 
@@ -44,3 +51,4 @@ publishing {
         mavenLocal()
     }
 }
+
