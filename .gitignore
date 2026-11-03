@@ -1,0 +1,11 @@
+.gradle/
+build/
+*.iml
+.idea/
+local.properties
+.DS_Store
+.kotlin/
+
+# Kotlin/JS 的 yarn 锁文件需要入库，保证各机器依赖一致
+!kotlin-js-store/
+!kotlin-js-store/yarn.lock
